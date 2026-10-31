@@ -1,0 +1,35 @@
+# ============================================================
+# Restricted Area Monitoring & Unauthorized Entry Detection
+# Dependencies (Pinned versions for full Windows compatibility)
+# ============================================================
+
+# Core Computer Vision
+opencv-python==4.11.0.86
+numpy==1.24.3
+Pillow==11.3.0
+
+# Deep Learning - Object Detection (YOLOv8)
+ultralytics==8.4.60
+
+
+
+# Number Plate OCR
+easyocr==1.7.2
+
+# Web Dashboard
+streamlit==1.40.0
+streamlit-drawable-canvas==0.9.3
+
+# Configuration
+PyYAML==6.0.3
+
+# Data & Visualization
+pandas==2.3.3
+plotly==6.7.0
+
+# Facial Verification (DeepFace & TensorFlow CPU Compatibility)
+deepface==0.0.100
+tensorflow-cpu==2.13.0
+tensorflow-intel==2.13.0
+protobuf==3.20.3
+typing_extensions==4.5.0

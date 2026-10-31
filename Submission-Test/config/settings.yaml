@@ -1,0 +1,86 @@
+# ============================================================
+# Configuration Settings
+# Restricted Area Monitoring System
+# ============================================================
+
+# Video preprocessing settings
+preprocessing:
+  resize_width: 640
+  resize_height: 480
+  gaussian_blur_kernel: 5        # Must be odd number
+  clahe_clip_limit: 2.0          # Contrast enhancement strength
+  clahe_tile_grid_size: 8        # Grid size for CLAHE
+  frame_skip: 3                  # Process every N-th frame (1 = process every frame)
+  enable_contrast_stretching: false
+  enable_sharpening: false
+  gamma: 1.0                     # Power-law transformation (1.0 = no correction)
+
+
+# Motion detection settings
+motion_detection:
+  algorithm: "MOG2"              # Background subtraction: MOG2 or KNN
+  history: 500                   # Number of frames for background model
+  var_threshold: 40              # Variance threshold for MOG2
+  detect_shadows: true           # Whether to detect shadows
+  min_contour_area: 500          # Minimum contour area to consider as motion
+  learning_rate: -1              # -1 for automatic learning rate
+
+# YOLO object detection settings
+object_detection:
+  model_path: "yolov8n.pt"       # YOLOv8 nano (fast) or yolov8m.pt (accurate)
+  confidence_threshold: 0.5      # Minimum confidence for detections
+  iou_threshold: 0.45            # IoU threshold for NMS
+  device: "cpu"                  # "cpu" or "cuda" for GPU
+
+  # COCO class mapping to our 3 categories
+  person_classes: [0]            # COCO class 0 = person
+  vehicle_classes: [2, 3, 5, 7]  # car, motorcycle, bus, truck
+  animal_classes: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe
+
+# Face detection settings (Local OpenCV Cascades)
+face_detection:
+  scale_factor: 1.1              # Haar Cascade scaleFactor
+  min_neighbors: 4               # Haar Cascade minNeighbors
+  min_size: 30                   # Minimum face size in pixels
+
+# Number plate detection settings
+plate_detection:
+  min_plate_width: 60            # Minimum plate width in pixels
+  min_plate_height: 20           # Minimum plate height in pixels
+  ocr_languages: ["en"]          # OCR languages
+  ocr_confidence_threshold: 0.3  # Minimum OCR confidence
+
+# Animal classification settings
+animal_classification:
+  # Maps COCO class IDs to animal types and risk levels
+  domestic_animals: ["cat", "dog"]
+  wild_animals: ["bird", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"]
+  high_risk_animals: ["bear", "elephant"]
+
+# Alert settings
+alerts:
+  cooldown_seconds: 5            # Minimum seconds between alerts for same object
+  severity_levels:
+    person: "HIGH"
+    vehicle: "MEDIUM"
+    animal_domestic: "LOW"
+    animal_wild: "HIGH"
+
+# Output settings
+output:
+  save_annotated_video: true
+  save_detection_frames: true
+  output_directory: "output"
+  log_file: "detection_log.csv"
+
+# Authorization settings
+authorization:
+  authorized_plates_file: "config/authorized_plates.json"
+  authorized_faces_dir: "data/authorized_faces"
+
+# Face Verification (DeepFace)
+face_verification:
+  model_name: "Facenet"          # Options: VGG-Face, Facenet, OpenFace, DeepFace
+  distance_metric: "cosine"
+  threshold: 0.65                 # Cosine distance threshold for a match
+

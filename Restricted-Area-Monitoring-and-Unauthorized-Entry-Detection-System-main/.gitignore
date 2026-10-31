@@ -1,0 +1,41 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Project outputs & temporary files
+output/
+temp/
+*.log
+detection_log.csv
+output_video.mp4
+annotated_output.mp4
+
+# Deep Learning weights (YOLO)
+*.pt
+
+# IDE / System configurations
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# EasyOCR cache (if stored inside project)
+.easyocr/
+
+# Large videos in data directory
+data/*.mp4
+
+# Ignore all profiles and pickle caches inside authorized faces directory
+data/authorized_faces/*
+!data/authorized_faces/.gitkeep
+
+
