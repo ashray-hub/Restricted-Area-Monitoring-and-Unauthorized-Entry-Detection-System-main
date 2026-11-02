@@ -642,12 +642,24 @@ def process_video(video_path: str, roi_points: list, config: dict,
                     if motion_detected:
                         frame_result.vehicles.append(vehicle_result)
 
+                    track_label = (
+                        f"ID:{detection.track_id}"
+                        if detection.track_id is not None
+                        else "ID:?"
+                    )
+
                     if vehicle_result.is_authorized:
                         color = (0, 255, 0)
-                        label = f"VEHICLE {vehicle_result.identity} (Authorized)"
+                        label = (
+                            f"{detection.class_label.upper()} {track_label} "
+                            f"{vehicle_result.identity} (Authorized)"
+                        )
                     else:
                         color = (0, 165, 255)
-                        label = f"{detection.class_label.upper()} {detection.confidence:.0%}"
+                        label = (
+                            f"{detection.class_label.upper()} "
+                            f"{track_label} {detection.confidence:.0%}"
+                        )
                         if vehicle_result.plate_detected and vehicle_result.plate_text:
                             label += f" [{vehicle_result.plate_text}]"
 
@@ -671,7 +683,11 @@ def process_video(video_path: str, roi_points: list, config: dict,
                     # detections in the existing in-zone summary.
                     draw_bbox(
                         annotated, bbox,
-                        f"OUTSIDE ZONE - {detection.class_label.upper()} {detection.confidence:.0%}",
+                        (
+                        f"OUTSIDE ZONE - {detection.class_label.upper()} "
+                        f"ID:{detection.track_id if detection.track_id is not None else '?'} "
+                        f"{detection.confidence:.0%}"
+                    ),
                         (255, 120, 0),
                     )
 
@@ -1341,18 +1357,28 @@ def main():
             # ---- Summary Metrics ----
             st.markdown("### 📊 Detection Summary")
             
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3 = st.columns(3)
+
             with col1:
-                render_metric_card("🎬", summary["total_frames_processed"], "Frames Processed")
+                render_metric_card(
+                    "🚗",
+                    summary["total_detections"]["vehicles"],
+                    "Vehicle Detections"
+                )
+
             with col2:
-                render_metric_card("🏃", summary["frames_with_motion"], "Motion Frames")
+                render_metric_card(
+                    "🚘",
+                    summary["total_detections"]["unique_vehicles"],
+                    "Unique Vehicles"
+                )
+
             with col3:
-                render_metric_card("👤", summary["total_detections"]["persons"], "Persons Detected")
-            with col4:
-                render_metric_card("🚗", summary["total_detections"]["vehicles"], "Vehicles Detected")
-            with col5:
-                render_metric_card("🐾", summary["total_detections"]["animals"], "Animals Detected")
-            
+                render_metric_card(
+                    "🐾",
+                    summary["total_detections"]["animals"],
+                    "Animals Detected"
+                )
             st.markdown("")
             
             # Alert count metrics

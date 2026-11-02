@@ -39,7 +39,7 @@ class Detection:
     class_label: str      # Specific label like "car", "dog"
     confidence: float     # 0.0 - 1.0
     frame_index: int      # Frame number
-
+    track_id: Optional[int] = None
 
 @dataclass
 class PersonResult:

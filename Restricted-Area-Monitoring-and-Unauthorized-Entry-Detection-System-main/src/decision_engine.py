@@ -114,7 +114,7 @@ class DecisionEngine:
         self._vehicle_tracks: Dict[int, Dict] = {}
         self._next_vehicle_track_id = 1
         self._matched_vehicle_track_ids = set()
-
+        self._external_vehicle_track_ids: Dict[int, int] = {}
 
         # Authorization settings
         auth_config = config.get("authorization", {})
@@ -253,48 +253,126 @@ class DecisionEngine:
         width, height = max(1.0, x2 - x1), max(1.0, y2 - y1)
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0, (width ** 2 + height ** 2) ** 0.5)
 
+    
     def _expire_vehicle_tracks(self, frame_index: int, fps: float) -> None:
-        """Remove tracks that have not been observed for the configured timeout."""
-        max_missing_frames = max(1, int(self.vehicle_track_timeout_seconds * fps))
+        """Remove stale tracks and their external ByteTrack mappings."""
+        max_missing_frames = max(
+            1, int(self.vehicle_track_timeout_seconds * fps)
+        )
+
         stale_ids = [
-            track_id for track_id, track in self._vehicle_tracks.items()
+            track_id
+            for track_id, track in self._vehicle_tracks.items()
             if frame_index - track["last_seen_frame"] > max_missing_frames
         ]
+
         for track_id in stale_ids:
             self._vehicle_tracks.pop(track_id, None)
 
-    def _get_or_create_vehicle_track(self, bbox, frame_index: int, fps: float) -> Dict:
-        """Associate this vehicle observation with the nearest recent track."""
+        # Remove ByteTrack mappings pointing to expired internal tracks.
+        expired_external_ids = [
+            external_id
+            for external_id, internal_id
+            in self._external_vehicle_track_ids.items()
+            if internal_id in stale_ids
+        ]
+
+        for external_id in expired_external_ids:
+            self._external_vehicle_track_ids.pop(external_id, None)
+
+
+   
+    def _get_or_create_vehicle_track(
+        self,
+        bbox,
+        frame_index: int,
+        fps: float,
+        external_track_id: Optional[int] = None,
+    ) -> Dict:
+        """Use ByteTrack identity when available, otherwise use IoU matching."""
+
+        # First, try to retrieve the exact track assigned by ByteTrack.
+        if external_track_id is not None:
+            internal_id = self._external_vehicle_track_ids.get(
+                external_track_id
+            )
+
+            if internal_id is not None:
+                track = self._vehicle_tracks.get(internal_id)
+
+                if track is not None:
+                    track["bbox"] = tuple(bbox)
+                    track["last_seen_frame"] = frame_index
+                    self._matched_vehicle_track_ids.add(internal_id)
+                    return track
+
+            # A new ByteTrack ID gets a new internal vehicle track.
+            return self._create_vehicle_track(
+                bbox, frame_index, external_track_id
+            )
+
+        # Fallback: retain your original IoU and centre-distance matching.
         best_track = None
         best_score = -1.0
         _, _, new_diag = self._bbox_center_and_diagonal(bbox)
 
+        max_missing_frames = max(
+            1, int(self.vehicle_track_timeout_seconds * fps)
+        )
+
         for track_id, track in self._vehicle_tracks.items():
             if track_id in self._matched_vehicle_track_ids:
                 continue
-            if frame_index - track["last_seen_frame"] > max(1, int(self.vehicle_track_timeout_seconds * fps)):
+
+            if frame_index - track["last_seen_frame"] > max_missing_frames:
                 continue
 
             iou = self._bbox_iou(bbox, track["bbox"])
-            cx1, cy1, old_diag = self._bbox_center_and_diagonal(track["bbox"])
+
+            cx1, cy1, old_diag = self._bbox_center_and_diagonal(
+                track["bbox"]
+            )
             cx2, cy2, _ = self._bbox_center_and_diagonal(bbox)
+
             distance = ((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2) ** 0.5
             distance_limit = max(28.0, 0.45 * max(old_diag, new_diag))
             near_enough = distance <= distance_limit
+
             if iou < self.vehicle_track_iou_threshold and not near_enough:
                 continue
 
-            proximity_score = max(0.0, 1.0 - distance / distance_limit)
+            proximity_score = max(
+                0.0, 1.0 - distance / distance_limit
+            )
             score = iou + 0.15 * proximity_score
+
             if score > best_score:
                 best_score = score
                 best_track = track
 
         if best_track is None:
-            track_id = self._next_vehicle_track_id
-            self._next_vehicle_track_id += 1
-            best_track = {
-                "track_id": track_id,
+            return self._create_vehicle_track(bbox, frame_index)
+
+        best_track["bbox"] = tuple(bbox)
+        best_track["last_seen_frame"] = frame_index
+
+        self._matched_vehicle_track_ids.add(best_track["track_id"])
+        return best_track
+
+
+    def _create_vehicle_track(
+        self,
+        bbox,
+        frame_index: int,
+        external_track_id: Optional[int] = None,
+    ) -> Dict:
+        """Create a new internal vehicle track."""
+
+        track_id = self._next_vehicle_track_id
+        self._next_vehicle_track_id += 1
+
+        track = {
+            "track_id": track_id,
             "bbox": tuple(bbox),
             "last_seen_frame": frame_index,
             "inside_streak": 0,
@@ -305,13 +383,17 @@ class DecisionEngine:
             "is_authorized": False,
             "plate_readings": [],
             "verified_plate": None,
-            }
-            self._vehicle_tracks[track_id] = best_track
+        }
 
-        best_track["bbox"] = tuple(bbox)
-        best_track["last_seen_frame"] = frame_index
-        self._matched_vehicle_track_ids.add(best_track["track_id"])
-        return best_track
+        self._vehicle_tracks[track_id] = track
+
+        if external_track_id is not None:
+            self._external_vehicle_track_ids[external_track_id] = track_id
+
+        self._matched_vehicle_track_ids.add(track_id)
+
+        return track
+
 
     def _update_vehicle_zone_state(self, track: Dict, in_zone: bool) -> bool:
         """Return True once when the track has a confirmed transition into the zone."""
@@ -438,7 +520,12 @@ class DecisionEngine:
         """Track vehicles and update an existing alert when a plate becomes readable."""
 
         track = self._get_or_create_vehicle_track(
-            vehicle.detection.bbox, frame_index, fps
+        vehicle.detection.bbox,
+        frame_index,
+        fps,
+        external_track_id=getattr(
+            vehicle.detection, "track_id", None
+        ),
         )
 
 	
@@ -720,11 +807,27 @@ class DecisionEngine:
             Dictionary containing detection counts, alert counts,
             and breakdown by type and severity
         """
-        # Count total detections across all frames
+        # Count detections across all frames
         total_persons = sum(len(fr.persons) for fr in self.all_frame_results)
-        total_vehicles = sum(len(fr.vehicles) for fr in self.all_frame_results)
+        total_vehicle_detections = sum(
+            len(fr.vehicles) for fr in self.all_frame_results
+        )
         total_animals = sum(len(fr.animals) for fr in self.all_frame_results)
-        motion_frames = sum(1 for fr in self.all_frame_results if fr.motion_detected)
+        motion_frames = sum(
+            1 for fr in self.all_frame_results if fr.motion_detected
+        )
+
+        # Count unique vehicles using tracking IDs
+        unique_vehicle_ids = set()
+
+        for frame_result in self.all_frame_results:
+            for vehicle in frame_result.vehicle_observations:
+                track_id = getattr(vehicle.detection, "track_id", None)
+
+                if track_id is not None:
+                    unique_vehicle_ids.add(track_id)
+
+        unique_vehicles = len(unique_vehicle_ids)
         
         # Count alerts by severity
         severity_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
@@ -741,9 +844,11 @@ class DecisionEngine:
             "frames_with_motion": motion_frames,
             "total_detections": {
                 "persons": total_persons,
-                "vehicles": total_vehicles,
                 "animals": total_animals,
-                "total": total_persons + total_vehicles + total_animals
+                "vehicles": total_vehicle_detections,
+                "unique_vehicles": unique_vehicles,
+                "total": total_persons + total_vehicle_detections + total_animals
+                
             },
             "total_alerts": len(self.alerts),
             "alerts_by_severity": severity_counts,
@@ -792,5 +897,6 @@ class DecisionEngine:
         self.all_frame_results.clear()
         self._last_alert_frame.clear()
         self._vehicle_tracks.clear()
+        self._external_vehicle_track_ids.clear()
         self._next_vehicle_track_id = 1
         self._matched_vehicle_track_ids.clear()

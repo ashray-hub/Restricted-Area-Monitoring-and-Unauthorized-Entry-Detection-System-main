@@ -10,6 +10,8 @@ authorized or unauthorized entry and assigns severity levels.
 
 import csv
 import os
+import re
+from collections import Counter, deque
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
@@ -96,12 +98,23 @@ class DecisionEngine:
         self.vehicle_entry_confirm_frames = max(
             1, int(alert_config.get("vehicle_entry_confirm_frames", 2))
         )
+        
         self.vehicle_exit_confirm_frames = max(
             1, int(alert_config.get("vehicle_exit_confirm_frames", 2))
         )
+
+        self.plate_verification_min_readings = max(
+            1, int(alert_config.get("plate_verification_min_readings", 1))
+        )
+        self.plate_verification_window = max(
+            self.plate_verification_min_readings,
+            int(alert_config.get("plate_verification_window", 5))
+        )
+
         self._vehicle_tracks: Dict[int, Dict] = {}
         self._next_vehicle_track_id = 1
         self._matched_vehicle_track_ids = set()
+
 
         # Authorization settings
         auth_config = config.get("authorization", {})
@@ -153,13 +166,63 @@ class DecisionEngine:
 
         # New code uses vehicle_observations (inside + outside the zone). Fall
         # back to vehicles for backward compatibility with older FrameResult users.
+        
         observations = getattr(frame_result, "vehicle_observations", None)
         if not observations:
             observations = frame_result.vehicles
+
+        # Remove duplicate detections of the same vehicle in one frame.
+        # Very high IoU indicates nearly identical bounding boxes.
+        unique_observations = []
+
         for vehicle in observations:
-            alert = self._evaluate_vehicle(vehicle, frame_result.frame_index, safe_fps)
+            duplicate_index = None
+
+            for index, existing in enumerate(unique_observations):
+                iou = self._bbox_iou(
+                    vehicle.detection.bbox,
+                    existing.detection.bbox,
+                )
+
+                if iou >= 0.85:
+                    duplicate_index = index
+                    break
+
+            if duplicate_index is None:
+                unique_observations.append(vehicle)
+                continue
+
+            existing = unique_observations[duplicate_index]
+            existing_has_plate = bool(
+                existing.plate_detected and existing.plate_text
+            )
+            current_has_plate = bool(
+                vehicle.plate_detected and vehicle.plate_text
+            )
+
+            # Prefer a readable plate; otherwise prefer higher detector confidence.
+            if (
+                (current_has_plate and not existing_has_plate)
+                or (
+                    current_has_plate == existing_has_plate
+                    and vehicle.detection.confidence
+                    > existing.detection.confidence
+                )
+            ):
+                unique_observations[duplicate_index] = vehicle
+
+            print(
+                "[VehicleTrack] Suppressed duplicate same-frame detection "
+                f"at frame {frame_result.frame_index}"
+            )
+
+        for vehicle in unique_observations:
+            alert = self._evaluate_vehicle(
+                vehicle, frame_result.frame_index, safe_fps
+            )
             if alert:
                 frame_alerts.append(alert)
+
 
         if frame_result.motion_detected:
             for animal in frame_result.animals:
@@ -232,14 +295,16 @@ class DecisionEngine:
             self._next_vehicle_track_id += 1
             best_track = {
                 "track_id": track_id,
-                "bbox": tuple(bbox),
-                "last_seen_frame": frame_index,
-                "inside_streak": 0,
-                "outside_streak": 0,
-                "confirmed_inside": False,
-                "alerted_for_entry": False,
-                "seen_outside_before": False,
-                "is_authorized": False,
+            "bbox": tuple(bbox),
+            "last_seen_frame": frame_index,
+            "inside_streak": 0,
+            "outside_streak": 0,
+            "confirmed_inside": False,
+            "alerted_for_entry": False,
+            "seen_outside_before": False,
+            "is_authorized": False,
+            "plate_readings": [],
+            "verified_plate": None,
             }
             self._vehicle_tracks[track_id] = best_track
 
@@ -332,6 +397,42 @@ class DecisionEngine:
     # --------------------------------------------------------
     
     
+    
+    def _verify_vehicle_plate(self, track: Dict, plate_text: str) -> Optional[str]:
+        """Verify a plate using the most recent consistent OCR readings."""
+        clean_plate = re.sub(r"[^A-Z0-9]", "", plate_text.upper())
+
+        if not clean_plate:
+            return None
+
+        readings = track.setdefault("plate_readings", [])
+        readings.append(clean_plate)
+        del readings[:-self.plate_verification_window]
+
+        counts = Counter(readings)
+        candidate, count = counts.most_common(1)[0]
+
+        print(
+            f"[PlateVerification] Track {track.get('track_id')}: "
+            f"candidate={candidate}, count={count}/"
+            f"{self.plate_verification_min_readings}"
+        )
+
+        if count >= self.plate_verification_min_readings:
+            track["verified_plate"] = candidate
+            print(
+                f"[PlateVerification] Track {track.get('track_id')}: "
+                f"verified plate {candidate}"
+            )
+            return candidate
+
+        # Preserve an established verification when new OCR readings
+        # are inconsistent. A single noisy reading must not revoke it.
+        return track.get("verified_plate")
+
+
+
+    
     def _evaluate_vehicle(self, vehicle: VehicleResult,
                         frame_index: int, fps: float) -> Optional[Alert]:
         """Track vehicles and update an existing alert when a plate becomes readable."""
@@ -340,25 +441,48 @@ class DecisionEngine:
             vehicle.detection.bbox, frame_index, fps
         )
 
+	
+        
+
+
         # Check whether the detected plate belongs to an authorized vehicle.
+        # Verify repeated OCR readings before authorizing by plate.
+        verified_plate = track.get("verified_plate")
+
         if vehicle.plate_detected and vehicle.plate_text:
-            import re
+            verified_plate = self._verify_vehicle_plate(
+                track, vehicle.plate_text
+            )
 
-            clean_ocr = re.sub(r"[^A-Z0-9]", "", vehicle.plate_text.upper())
-
+        if verified_plate:
             for auth_plate in self._load_authorized_plates():
-                clean_auth = re.sub(r"[^A-Z0-9]", "", auth_plate.upper())
+                clean_auth = re.sub(
+                    r"[^A-Z0-9]", "", auth_plate.upper()
+                )
 
-                if clean_ocr == clean_auth:
+                if verified_plate == clean_auth:
                     vehicle.is_authorized = True
                     vehicle.identity = auth_plate
                     break
 
-        if vehicle.is_authorized:
-            track["is_authorized"] = True
 
-        if track["is_authorized"]:
-            vehicle.is_authorized = True
+        track["is_authorized"] = bool(
+            verified_plate
+            and any(
+                verified_plate == re.sub(
+                    r"[^A-Z0-9]", "", plate.upper()
+                )
+                for plate in self._load_authorized_plates()
+            )
+        )
+
+        vehicle.is_authorized = track["is_authorized"]
+
+        if vehicle.is_authorized:
+            for plate in self._load_authorized_plates():
+                if verified_plate == re.sub(r"[^A-Z0-9]", "", plate.upper()):
+                    vehicle.identity = plate
+                    break
 
         # Update entry/exit tracking for every vehicle observation.
         entry_confirmed = self._update_vehicle_zone_state(

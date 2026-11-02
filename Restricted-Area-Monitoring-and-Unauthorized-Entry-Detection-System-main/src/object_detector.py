@@ -46,6 +46,7 @@ class ObjectDetector:
         # --- Load model ---
         model_path: str = config.get("model_path", "yolov8n.pt")
         self.model: YOLO = YOLO(model_path)
+        self.config = config
 
         # --- Detection thresholds ---
         self.confidence_threshold: float = config.get("confidence_threshold", 0.5)
@@ -72,79 +73,79 @@ class ObjectDetector:
     # Public Methods
     # ============================================================
 
+   
     def detect(self, frame: np.ndarray, frame_index: int = 0) -> List[Detection]:
         """
-        Run YOLOv8 inference on a single frame and return filtered detections.
-
-        Steps:
-            1. Run YOLO inference with configured thresholds.
-            2. Iterate over each detected box.
-            3. Map the COCO class ID to our three categories.
-            4. Filter out classes we don't track and low-confidence hits.
-            5. Build and return a list of Detection dataclass instances.
-
-        Args:
-            frame: BGR image as a numpy array (H, W, 3).
-            frame_index: Sequential index of this frame in the video.
-
-        Returns:
-            List of Detection objects that passed all filters.
+        Detect and track objects using YOLOv8 and ByteTrack.
         """
         detections: List[Detection] = []
 
-        # --- Run YOLO inference ---
-        results = self.model(
-            frame,
-            conf=self.confidence_threshold,
-            iou=self.iou_threshold,
-            device=self.device,
-            verbose=False,  # Suppress per-frame console output
-        )
+        tracking_enabled = self.config.get("tracking_enabled", True)
 
-        # results is a list; take the first (and only) element for a single image
-        if not results or len(results) == 0:
+        if tracking_enabled:
+            results = self.model.track(
+                frame,
+                persist=True,
+                tracker=self.config.get("tracker", "bytetrack.yaml"),
+                conf=self.config.get("tracking_inference_confidence", 0.1),
+                iou=self.iou_threshold,
+                device=self.device,
+                classes=list(self._class_id_to_category.keys()),
+                verbose=False,
+            )
+        else:
+            results = self.model(
+                frame,
+                conf=self.confidence_threshold,
+                iou=self.iou_threshold,
+                device=self.device,
+                verbose=False,
+            )
+
+        if not results:
             return detections
 
         result = results[0]
+        boxes = result.boxes
 
-        # If no boxes were detected, return empty list
-        if result.boxes is None or len(result.boxes) == 0:
+        if boxes is None or len(boxes) == 0:
             return detections
 
-        # --- Parse each detection box ---
-        boxes = result.boxes
         for i in range(len(boxes)):
-            # Extract raw values
-            class_id: int = int(boxes.cls[i].item())
-            confidence: float = float(boxes.conf[i].item())
+            class_id = int(boxes.cls[i].item())
+            confidence = float(boxes.conf[i].item())
 
-            # Map COCO class ID to our category
             mapped = self._map_class(class_id)
+
             if mapped is None:
-                # This class is not in our tracked categories – skip
+                continue
+
+            if confidence < self.confidence_threshold:
                 continue
 
             class_name, class_label = mapped
 
-            # Extra confidence filter (in case YOLO was run with a lower conf)
-            if confidence < self.confidence_threshold:
-                continue
-
-            # Bounding box in (x1, y1, x2, y2) pixel coordinates
             x1, y1, x2, y2 = boxes.xyxy[i].tolist()
-            bbox: tuple = (int(x1), int(y1), int(x2), int(y2))
+            bbox = (int(x1), int(y1), int(x2), int(y2))
 
-            # Build Detection dataclass
+            track_id = None
+
+            if tracking_enabled and boxes.id is not None:
+                track_id = int(boxes.id[i].item())
+
             detection = Detection(
                 bbox=bbox,
                 class_name=class_name,
                 class_label=class_label,
                 confidence=round(confidence, 4),
                 frame_index=frame_index,
+                track_id=track_id,
             )
+
             detections.append(detection)
 
         return detections
+
 
     # ============================================================
     # Private / Helper Methods
